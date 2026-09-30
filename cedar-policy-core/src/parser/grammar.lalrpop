@@ -45,6 +45,7 @@ match {
     // Common Identifiers
     "permit" => PERMIT,
     "forbid" => FORBID,
+    "conditional" => CONDITIONAL,
     "when" => WHEN,
     "unless" => UNLESS,
     "in" => IN,
@@ -101,7 +102,7 @@ Annotation: Node<Option<cst::Annotation>> = {
     <l:@L> "@" <key:AnyIdent> <value: ("(" <Str> ")")?> <r:@R> => Node::with_source_loc(Some(cst::Annotation{key,value}), Loc::new(l..r, Arc::clone(src)))
 }
 
-// Policy := "label" ('permit' | 'forbid') '(' {VariableDef} ')' {Cond} ;
+// Policy := "label" ('permit' | 'forbid' | 'conditional') '(' {VariableDef} ')' {Cond} ;
 pub Policy: Node<Option<cst::Policy>> = {
     <l:@L>
     <annotations:Annotation*>
@@ -148,6 +149,8 @@ CommonIdent: Node<Option<cst::Ident>> = {
         => Node::with_source_loc(Some(cst::Ident::Permit), Loc::new(l..r, Arc::clone(src))),
     <l:@L> FORBID <r:@R>
         => Node::with_source_loc(Some(cst::Ident::Forbid), Loc::new(l..r, Arc::clone(src))),
+    <l:@L> CONDITIONAL <r:@R>
+        => Node::with_source_loc(Some(cst::Ident::Conditional), Loc::new(l..r, Arc::clone(src))),
     <l:@L> WHEN <r:@R>
         => Node::with_source_loc(Some(cst::Ident::When), Loc::new(l..r, Arc::clone(src))),
     <l:@L> UNLESS <r:@R>

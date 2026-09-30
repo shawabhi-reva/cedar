@@ -108,6 +108,8 @@ pub enum Ident {
     Permit,
     /// forbid
     Forbid,
+    /// conditional
+    Conditional,
     /// when
     When,
     /// unless

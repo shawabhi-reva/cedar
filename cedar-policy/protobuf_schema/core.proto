@@ -72,6 +72,7 @@ message Policy {
 enum Effect {
     Forbid = 0;
     Permit = 1;
+    Conditional = 2;
 }
 
 message TemplateBody {

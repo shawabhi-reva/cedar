@@ -175,9 +175,9 @@ pub enum ToASTErrorKind {
     #[error("'=' is not a valid operator in Cedar")]
     #[diagnostic(help("try using '==' instead"))]
     InvalidSingleEq,
-    /// Returned when a policy uses an effect keyword beyond `permit` or `forbid`
+    /// Returned when a policy uses an effect keyword beyond `permit`, `forbid`, or `conditional`
     #[error("invalid policy effect: {0}")]
-    #[diagnostic(help("effect must be either `permit` or `forbid`"))]
+    #[diagnostic(help("effect must be `permit`, `forbid`, or `conditional`"))]
     InvalidEffect(cst::Ident),
     /// Returned when a policy uses a condition keyword beyond `when` or `unless`
     #[error("invalid policy condition: {0}")]
@@ -734,6 +734,7 @@ lazy_static! {
             ("IF", "`if`"),
             ("PERMIT", "`permit`"),
             ("FORBID", "`forbid`"),
+            ("CONDITIONAL", "`conditional`"),
             ("WHEN", "`when`"),
             ("UNLESS", "`unless`"),
             ("IN", "`in`"),
@@ -756,6 +757,7 @@ lazy_static! {
         special_identifier_tokens: HashSet::from([
             "PERMIT",
             "FORBID",
+            "CONDITIONAL",
             "WHEN",
             "UNLESS",
             "IN",

@@ -702,6 +702,7 @@ impl Node<Option<cst::Ident>> {
         match effect {
             cst::Ident::Permit => Ok(ast::Effect::Permit),
             cst::Ident::Forbid => Ok(ast::Effect::Forbid),
+            cst::Ident::Conditional => Ok(ast::Effect::Conditional),
             _ => Err(self
                 .to_ast_err(ToASTErrorKind::InvalidEffect(effect.clone()))
                 .into()),

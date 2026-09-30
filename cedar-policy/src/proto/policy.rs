@@ -413,6 +413,7 @@ impl From<&models::Effect> for ast::Effect {
         match v {
             models::Effect::Forbid => ast::Effect::Forbid,
             models::Effect::Permit => ast::Effect::Permit,
+            models::Effect::Conditional => ast::Effect::Conditional,
         }
     }
 }
@@ -422,6 +423,7 @@ impl From<&ast::Effect> for models::Effect {
         match v {
             ast::Effect::Permit => models::Effect::Permit,
             ast::Effect::Forbid => models::Effect::Forbid,
+            ast::Effect::Conditional => models::Effect::Conditional,
         }
     }
 }
@@ -536,6 +538,10 @@ mod test {
         assert_eq!(
             ast::Effect::Forbid,
             ast::Effect::from(&models::Effect::from(&ast::Effect::Forbid))
+        );
+        assert_eq!(
+            ast::Effect::Conditional,
+            ast::Effect::from(&models::Effect::from(&ast::Effect::Conditional))
         );
 
         let er1 = ast::EntityReference::euid(Arc::new(

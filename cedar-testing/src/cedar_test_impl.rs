@@ -101,6 +101,7 @@ pub mod partial {
     pub enum Decision {
         Allow,
         Deny,
+        ConditionalAllow,
         Unknown,
     }
 
@@ -109,6 +110,9 @@ pub mod partial {
             match o {
                 Some(cedar_policy_core::authorizer::Decision::Allow) => Self::Allow,
                 Some(cedar_policy_core::authorizer::Decision::Deny) => Self::Deny,
+                Some(cedar_policy_core::authorizer::Decision::ConditionalAllow) => {
+                    Self::ConditionalAllow
+                }
                 None => Self::Unknown,
             }
         }

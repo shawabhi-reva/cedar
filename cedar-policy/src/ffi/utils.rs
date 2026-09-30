@@ -731,7 +731,7 @@ mod test {
             &ExpectedErrorMessageBuilder::error("failed to parse policy from string")
                 .source("invalid policy effect: foo")
                 .exactly_one_underline("foo")
-                .help("effect must be either `permit` or `forbid`")
+                .help("effect must be `permit`, `forbid`, or `conditional`")
                 .build(),
         );
 

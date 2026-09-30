@@ -98,6 +98,9 @@ impl Authorizer {
         let mut false_forbids = vec![];
         let mut residual_permits = vec![];
         let mut residual_forbids = vec![];
+        let mut true_conditionals = vec![];
+        let mut false_conditionals = vec![];
+        let mut residual_conditionals = vec![];
         let mut errors = vec![];
 
         for p in pset.policies() {
@@ -106,11 +109,15 @@ impl Authorizer {
                 Ok(Either::Left(satisfied)) => match (satisfied, p.effect()) {
                     (true, Effect::Permit) => true_permits.push((id, annotations)),
                     (true, Effect::Forbid) => true_forbids.push((id, annotations)),
+                    (true, Effect::Conditional) => true_conditionals.push((id, annotations)),
                     (false, Effect::Permit) => {
                         false_permits.push((id, (ErrorState::NoError, annotations)))
                     }
                     (false, Effect::Forbid) => {
                         false_forbids.push((id, (ErrorState::NoError, annotations)))
+                    }
+                    (false, Effect::Conditional) => {
+                        false_conditionals.push((id, (ErrorState::NoError, annotations)))
                     }
                 },
                 Ok(Either::Right(residual)) => match p.effect() {
@@ -119,6 +126,9 @@ impl Authorizer {
                     }
                     Effect::Forbid => {
                         residual_forbids.push((id, (Arc::new(residual), annotations)))
+                    }
+                    Effect::Conditional => {
+                        residual_conditionals.push((id, (Arc::new(residual), annotations)))
                     }
                 },
                 Err(e) => {
@@ -132,11 +142,17 @@ impl Authorizer {
                     match (satisfied, p.effect()) {
                         (true, Effect::Permit) => true_permits.push((id, annotations)),
                         (true, Effect::Forbid) => true_forbids.push((id, annotations)),
+                        (true, Effect::Conditional) => {
+                            true_conditionals.push((id, annotations))
+                        }
                         (false, Effect::Permit) => {
                             false_permits.push((id, (ErrorState::Error, annotations)))
                         }
                         (false, Effect::Forbid) => {
                             false_forbids.push((id, (ErrorState::Error, annotations)))
+                        }
+                        (false, Effect::Conditional) => {
+                            false_conditionals.push((id, (ErrorState::Error, annotations)))
                         }
                     }
                 }
@@ -150,6 +166,9 @@ impl Authorizer {
             true_forbids,
             false_forbids,
             residual_forbids,
+            true_conditionals,
+            false_conditionals,
+            residual_conditionals,
             errors,
             Arc::new(q),
         )
@@ -639,6 +658,199 @@ mod test {
         assert!(r.residual_permits.contains_key(&PolicyID::from_string("2")));
         assert!(r.residual_forbids.is_empty());
     }
+
+    fn empty_request() -> Request {
+        Request::new(
+            (EntityUID::with_eid("p"), None),
+            (EntityUID::with_eid("a"), None),
+            (EntityUID::with_eid("r"), None),
+            Context::empty(),
+            None::<&RequestSchemaAllPass>,
+            Extensions::none(),
+        )
+        .unwrap()
+    }
+
+    fn reason_ids(r: &Response) -> HashSet<String> {
+        r.diagnostics.reason.iter().map(|id| id.to_string()).collect()
+    }
+
+    /// Every combination of satisfied permit / conditional / forbid policies:
+    /// `forbid` > `conditional` > `permit` > default deny
+    #[test]
+    fn conditional_precedence_table() {
+        let a = Authorizer::new();
+        let es = Entities::new();
+        let cases = [
+            // (permit, conditional, forbid) => (decision, reason)
+            ((false, false, false), Decision::Deny, vec![]),
+            ((true, false, false), Decision::Allow, vec!["permit"]),
+            ((false, true, false), Decision::ConditionalAllow, vec!["conditional"]),
+            ((true, true, false), Decision::ConditionalAllow, vec!["conditional"]),
+            ((false, false, true), Decision::Deny, vec!["forbid"]),
+            ((true, false, true), Decision::Deny, vec!["forbid"]),
+            ((false, true, true), Decision::Deny, vec!["forbid"]),
+            ((true, true, true), Decision::Deny, vec!["forbid"]),
+        ];
+        for ((permit, conditional, forbid), expected, reason) in cases {
+            let mut pset = PolicySet::new();
+            for (present, id, effect) in [
+                (permit, "permit", Effect::Permit),
+                (conditional, "conditional", Effect::Conditional),
+                (forbid, "forbid", Effect::Forbid),
+            ] {
+                if present {
+                    pset.add_static(true_policy(id, effect)).unwrap();
+                }
+            }
+            let ans = a.is_authorized(empty_request(), &pset, &es);
+            let case = (permit, conditional, forbid);
+            assert_eq!(ans.decision, expected, "case {case:?}");
+            assert_eq!(
+                reason_ids(&ans),
+                reason.into_iter().map(String::from).collect(),
+                "case {case:?}"
+            );
+        }
+    }
+
+    /// Obligations travel as annotations on the determining conditional policies
+    #[test]
+    fn conditional_reason_carries_annotations() {
+        let a = Authorizer::new();
+        let es = Entities::new();
+        let mut pset = PolicySet::new();
+        let src = r#"
+        @obligation("mfa")
+        conditional(principal, action, resource);
+        "#;
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("c")), src).unwrap())
+            .unwrap();
+        pset.add_static(true_policy("p", Effect::Permit)).unwrap();
+
+        let ans = a.is_authorized(empty_request(), &pset, &es);
+        assert_eq!(ans.decision, Decision::ConditionalAllow);
+        let obligations: Vec<_> = ans
+            .diagnostics
+            .reason
+            .iter()
+            .filter_map(|id| pset.get(id))
+            .filter_map(|p| p.annotation(&"obligation".parse().unwrap()))
+            .map(|v| v.val.to_string())
+            .collect();
+        assert_eq!(obligations, vec!["mfa".to_string()]);
+    }
+
+    /// An erroring conditional is skipped, exactly like an erroring forbid
+    #[test]
+    fn conditional_skip_on_error() {
+        let a = Authorizer::new();
+        let es = Entities::new();
+        let mut pset = PolicySet::new();
+        pset.add_static(true_policy("p", Effect::Permit)).unwrap();
+        let src = r#"
+        conditional(principal, action, resource) when { context.bad == 2 };
+        "#;
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("c")), src).unwrap())
+            .unwrap();
+
+        let ans = a.is_authorized(empty_request(), &pset, &es);
+        assert_eq!(ans.decision, Decision::Allow);
+        assert_eq!(ans.diagnostics.errors.len(), 1);
+    }
+
+    #[test]
+    fn conditional_parses_and_prints() {
+        let src = r#"conditional(principal, action, resource) when { context.mfa };"#;
+        let p = parser::parse_policy(Some(PolicyID::from_string("c")), src).unwrap();
+        assert_eq!(p.effect(), Effect::Conditional);
+        assert!(p.to_string().starts_with("conditional("));
+        // round-trips through its own printed form
+        let reparsed =
+            parser::parse_policy(Some(PolicyID::from_string("c")), &p.to_string()).unwrap();
+        assert_eq!(reparsed.effect(), Effect::Conditional);
+    }
+
+    /// Adding the keyword must not break policies that use `conditional` as a name
+    #[test]
+    fn conditional_is_still_a_valid_attribute_name() {
+        let src = r#"
+        permit(principal, action, resource) when {
+            context.conditional == true && resource has conditional
+        };
+        "#;
+        let p = parser::parse_policy(Some(PolicyID::from_string("p")), src).unwrap();
+        assert_eq!(p.effect(), Effect::Permit);
+    }
+
+    #[test]
+    #[cfg(feature = "partial-eval")]
+    fn residual_conditionals() {
+        use std::collections::HashMap;
+
+        let a = Authorizer::new();
+        let es = Entities::new();
+        let mut pset = PolicySet::new();
+        pset.add_static(true_policy("p", Effect::Permit)).unwrap();
+        let src = r#"
+        conditional(principal, action, resource) when { unknown("c") };
+        "#;
+        pset.add_static(parser::parse_policy(Some(PolicyID::from_string("c")), src).unwrap())
+            .unwrap();
+
+        // A residual conditional may still override the satisfied permit
+        let r = a.is_authorized_core(empty_request(), &pset, &es);
+        assert_eq!(r.decision(), None);
+        assert!(r.residual_conditionals.contains_key(&PolicyID::from_string("c")));
+        assert!(r.must_be_determining().next().is_none());
+
+        let map = HashMap::from([("c".into(), Value::from(true))]);
+        let r2: Response = r.reauthorize(&map, &a, &es).unwrap().into();
+        assert_eq!(r2.decision, Decision::ConditionalAllow);
+
+        let map = HashMap::from([("c".into(), Value::from(false))]);
+        let r2: Response = r.reauthorize(&map, &a, &es).unwrap().into();
+        assert_eq!(r2.decision, Decision::Allow);
+    }
+
+    #[test]
+    #[cfg(feature = "partial-eval")]
+    fn satisfied_conditional_residual_forbid_and_permit() {
+        let a = Authorizer::new();
+        let es = Entities::new();
+
+        // satisfied conditional + residual permit => conditional allow (permits can't override it)
+        let mut pset = PolicySet::new();
+        pset.add_static(true_policy("c", Effect::Conditional)).unwrap();
+        pset.add_static(context_pol("p", Effect::Permit)).unwrap();
+        let q = Request::new(
+            (EntityUID::with_eid("p"), None),
+            (EntityUID::with_eid("a"), None),
+            (EntityUID::with_eid("r"), None),
+            Context::from_expr(
+                RestrictedExpr::record([(
+                    "test".into(),
+                    RestrictedExpr::unknown(Unknown::new_untyped("t")),
+                )])
+                .unwrap()
+                .as_borrowed(),
+                Extensions::none(),
+            )
+            .unwrap(),
+            None::<&RequestSchemaAllPass>,
+            Extensions::none(),
+        )
+        .unwrap();
+        let r = a.is_authorized_core(q.clone(), &pset, &es);
+        assert_eq!(r.decision(), Some(Decision::ConditionalAllow));
+
+        // satisfied conditional + residual forbid => unknown (the forbid may still fire)
+        let mut pset = PolicySet::new();
+        pset.add_static(true_policy("c", Effect::Conditional)).unwrap();
+        pset.add_static(context_pol("f", Effect::Forbid)).unwrap();
+        let r = a.is_authorized_core(q, &pset, &es);
+        assert_eq!(r.decision(), None);
+    }
 }
 
 /// Authorization response returned from the `Authorizer`
@@ -697,6 +909,10 @@ impl Response {
 pub enum Decision {
     /// The `Authorizer` determined that the request should be allowed
     Allow,
+    /// The `Authorizer` determined that the request should be allowed only if
+    /// the caller fulfils the conditions attached (as annotations) to the
+    /// satisfied `conditional` policies, which are reported as the reason.
+    ConditionalAllow,
     /// The `Authorizer` determined that the request should be denied.
     /// This is also returned if sufficiently fatal errors are encountered such
     /// that no decision could be safely reached; for example, errors parsing

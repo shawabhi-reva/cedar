@@ -421,6 +421,7 @@ impl fmt::Display for Ident {
             Ident::False => write!(f, "false"),
             Ident::Permit => write!(f, "permit"),
             Ident::Forbid => write!(f, "forbid"),
+            Ident::Conditional => write!(f, "conditional"),
             Ident::When => write!(f, "when"),
             Ident::Unless => write!(f, "unless"),
             Ident::In => write!(f, "in"),

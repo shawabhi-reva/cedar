@@ -177,7 +177,7 @@ mod test {
         assert_exactly_one_error(
             &errs,
             "cannot parse input policies: invalid policy effect: foo",
-            Some("effect must be either `permit` or `forbid`"),
+            Some("effect must be `permit`, `forbid`, or `conditional`"),
         );
     }
 }

@@ -58,6 +58,12 @@ pub struct PartialResponse {
     pub false_forbids: HashMap<PolicyID, (ErrorState, Arc<Annotations>)>,
     /// All of the [`Effect::Forbid`] policies that evaluated to a residual
     pub residual_forbids: HashMap<PolicyID, (Arc<Expr>, Arc<Annotations>)>,
+    /// All of the [`Effect::Conditional`] policies that were satisfied
+    pub satisfied_conditionals: HashMap<PolicyID, Arc<Annotations>>,
+    /// All of the [`Effect::Conditional`] policies that were not satisfied
+    pub false_conditionals: HashMap<PolicyID, (ErrorState, Arc<Annotations>)>,
+    /// All of the [`Effect::Conditional`] policies that evaluated to a residual
+    pub residual_conditionals: HashMap<PolicyID, (Arc<Expr>, Arc<Annotations>)>,
     /// All of the policy errors encountered during evaluation
     pub errors: Vec<AuthorizationError>,
     /// The trivial `true` expression, used for materializing a residual for satisfied policies
@@ -78,6 +84,9 @@ impl PartialResponse {
         true_forbids: impl IntoIterator<Item = (PolicyID, Arc<Annotations>)>,
         false_forbids: impl IntoIterator<Item = (PolicyID, (ErrorState, Arc<Annotations>))>,
         residual_forbids: impl IntoIterator<Item = (PolicyID, (Arc<Expr>, Arc<Annotations>))>,
+        true_conditionals: impl IntoIterator<Item = (PolicyID, Arc<Annotations>)>,
+        false_conditionals: impl IntoIterator<Item = (PolicyID, (ErrorState, Arc<Annotations>))>,
+        residual_conditionals: impl IntoIterator<Item = (PolicyID, (Arc<Expr>, Arc<Annotations>))>,
         errors: impl IntoIterator<Item = AuthorizationError>,
         request: Arc<Request>,
     ) -> Self {
@@ -88,6 +97,9 @@ impl PartialResponse {
             satisfied_forbids: true_forbids.into_iter().collect(),
             false_forbids: false_forbids.into_iter().collect(),
             residual_forbids: residual_forbids.into_iter().collect(),
+            satisfied_conditionals: true_conditionals.into_iter().collect(),
+            false_conditionals: false_conditionals.into_iter().collect(),
+            residual_conditionals: residual_conditionals.into_iter().collect(),
             errors: errors.into_iter().collect(),
             true_expr: Arc::new(Expr::val(true)),
             false_expr: Arc::new(Expr::val(false)),
@@ -102,24 +114,35 @@ impl PartialResponse {
     }
 
     /// Attempt to reach a partial decision; the presence of residuals may result in returning [`None`],
-    /// indicating that a decision could not be reached given the unknowns
+    /// indicating that a decision could not be reached given the unknowns.
+    ///
+    /// Precedence is `forbid` > `conditional` > `permit` > default deny.
     pub fn decision(&self) -> Option<Decision> {
-        match (
-            !self.satisfied_forbids.is_empty(),
-            !self.satisfied_permits.is_empty(),
-            !self.residual_permits.is_empty(),
-            !self.residual_forbids.is_empty(),
-        ) {
+        let can_grant = !self.satisfied_permits.is_empty()
+            || !self.residual_permits.is_empty()
+            || !self.satisfied_conditionals.is_empty()
+            || !self.residual_conditionals.is_empty();
+        if !self.satisfied_forbids.is_empty() {
             // Any true forbids means we will deny
-            (true, _, _, _) => Some(Decision::Deny),
-            // No potentially or trivially true permits, means we default deny
-            (_, false, false, _) => Some(Decision::Deny),
-            // Potentially true forbids, means we can't know (as that forbid may evaluate to true, overriding any permits)
-            (false, _, _, true) => None,
-            // No true permits, but some potentially true permits + no true/potentially true forbids means we don't know
-            (false, false, true, false) => None,
-            // At least one trivially true permit, and no trivially or possible true forbids, means we allow
-            (false, true, _, false) => Some(Decision::Allow),
+            Some(Decision::Deny)
+        } else if !can_grant {
+            // No potentially or trivially true permits/conditionals, means we default deny
+            Some(Decision::Deny)
+        } else if !self.residual_forbids.is_empty() {
+            // Potentially true forbids, means we can't know (as that forbid may evaluate to true, overriding everything else)
+            None
+        } else if !self.satisfied_conditionals.is_empty() {
+            // A trivially true conditional, and no trivially or possibly true forbids, means we allow conditionally
+            Some(Decision::ConditionalAllow)
+        } else if !self.residual_conditionals.is_empty() {
+            // A potentially true conditional could still override any permits, means we don't know
+            None
+        } else if !self.satisfied_permits.is_empty() {
+            // At least one trivially true permit, and no trivially or possibly true forbids/conditionals, means we allow
+            Some(Decision::Allow)
+        } else {
+            // No true permits, but some potentially true permits means we don't know
+            None
         }
     }
 
@@ -137,10 +160,18 @@ impl PartialResponse {
         })
     }
 
-    /// Returns the set of [`PolicyID`]s that were definitely satisfied -- both permits and forbids
+    /// All of the [`Effect::Conditional`] policies that were known to be satisfied
+    fn definitely_satisfied_conditionals(&self) -> impl Iterator<Item = Policy> + '_ {
+        self.satisfied_conditionals.iter().map(|(id, annotations)| {
+            construct_policy((Effect::Conditional, id, &self.true_expr, annotations))
+        })
+    }
+
+    /// Returns the set of [`PolicyID`]s that were definitely satisfied -- permits, forbids and conditionals
     pub fn definitely_satisfied(&self) -> impl Iterator<Item = Policy> + '_ {
         self.definitely_satisfied_permits()
             .chain(self.definitely_satisfied_forbids())
+            .chain(self.definitely_satisfied_conditionals())
     }
 
     /// Returns the set of [`PolicyID`]s that encountered errors
@@ -148,6 +179,7 @@ impl PartialResponse {
         self.false_permits
             .iter()
             .chain(self.false_forbids.iter())
+            .chain(self.false_conditionals.iter())
             .filter_map(did_error)
     }
 
@@ -155,20 +187,30 @@ impl PartialResponse {
     ///
     /// This is all policies that may be determining for any substitution of the unknowns.
     pub fn may_be_determining(&self) -> impl Iterator<Item = Policy> + '_ {
-        if self.satisfied_forbids.is_empty() {
-            // We have no definitely true forbids, so the over approx is everything that is true or potentially true
-            Either::Left(
-                self.definitely_satisfied_permits()
-                    .chain(self.residual_permits())
-                    .chain(self.residual_forbids()),
-            )
-        } else {
+        if !self.satisfied_forbids.is_empty() {
             // We have definitely true forbids, so we know only things that can determine is
             // true forbids and potentially true forbids
             Either::Right(
                 self.definitely_satisfied_forbids()
                     .chain(self.residual_forbids()),
             )
+        } else if !self.satisfied_conditionals.is_empty() {
+            // We have definitely true conditionals and no definitely true forbids, so permits
+            // can no longer determine the decision
+            Either::Left(Either::Right(
+                self.definitely_satisfied_conditionals()
+                    .chain(self.residual_conditionals())
+                    .chain(self.residual_forbids()),
+            ))
+        } else {
+            // We have no definitely true forbids or conditionals, so the over approx is everything
+            // that is true or potentially true
+            Either::Left(Either::Left(
+                self.definitely_satisfied_permits()
+                    .chain(self.residual_permits())
+                    .chain(self.residual_conditionals())
+                    .chain(self.residual_forbids()),
+            ))
         }
     }
 
@@ -188,23 +230,36 @@ impl PartialResponse {
             })
     }
 
+    fn residual_conditionals(&self) -> impl Iterator<Item = Policy> + '_ {
+        self.residual_conditionals
+            .iter()
+            .map(|(id, (expr, annotations))| {
+                construct_policy((Effect::Conditional, id, expr, annotations))
+            })
+    }
+
     /// Returns an under-approximation of the set of determining policies.
     ///
     /// This is all policies that must be determining for all possible substitutions of the unknowns.
     pub fn must_be_determining(&self) -> impl Iterator<Item = Policy> + '_ {
-        // If there are no true forbids or potentially true forbids,
-        // then the under approximation is the true permits
-        if self.satisfied_forbids.is_empty() && self.residual_forbids.is_empty() {
-            Either::Left(self.definitely_satisfied_permits())
-        } else {
-            // Otherwise it's the true forbids
+        if !self.satisfied_forbids.is_empty() || !self.residual_forbids.is_empty() {
+            // If there are true or potentially true forbids, it's the true forbids
             Either::Right(self.definitely_satisfied_forbids())
+        } else if !self.satisfied_conditionals.is_empty() || !self.residual_conditionals.is_empty()
+        {
+            // Otherwise, if there are true or potentially true conditionals, it's the true conditionals
+            Either::Left(Either::Right(self.definitely_satisfied_conditionals()))
+        } else {
+            // Otherwise the under approximation is the true permits
+            Either::Left(Either::Left(self.definitely_satisfied_permits()))
         }
     }
 
     /// Returns the set of non-trivial (meaning more than just `true` or `false`) residuals expressions
     pub fn nontrivial_residuals(&'_ self) -> impl Iterator<Item = Policy> + '_ {
-        self.nontrival_permits().chain(self.nontrival_forbids())
+        self.nontrival_permits()
+            .chain(self.nontrival_forbids())
+            .chain(self.residual_conditionals())
     }
 
     /// Returns the set of ids of non-trivial (meaning more than just `true` or `false`) residuals expressions
@@ -212,6 +267,7 @@ impl PartialResponse {
         self.residual_permits
             .keys()
             .chain(self.residual_forbids.keys())
+            .chain(self.residual_conditionals.keys())
     }
 
     /// Returns the set of non-trivial (meaning more than just `true` or `false`) residuals expressions from [`Effect::Permit`]
@@ -236,6 +292,7 @@ impl PartialResponse {
     pub fn all_residuals(&'_ self) -> impl Iterator<Item = Policy> + '_ {
         self.all_permit_residuals()
             .chain(self.all_forbid_residuals())
+            .chain(self.all_conditional_residuals())
             .map(construct_policy)
     }
 
@@ -279,9 +336,31 @@ impl PartialResponse {
             .map(|(id, (r, a))| (Effect::Forbid, id, r, a))
     }
 
+    /// Returns all residuals expressions that come from [`Effect::Conditional`] policies
+    fn all_conditional_residuals(&'_ self) -> impl Iterator<Item = PolicyComponents<'_>> {
+        let trues = self
+            .satisfied_conditionals
+            .iter()
+            .map(|(id, a)| (id, (&self.true_expr, a)));
+        let falses = self
+            .false_conditionals
+            .iter()
+            .map(|(id, (_, a))| (id, (&self.false_expr, a)));
+        let nontrivial = self
+            .residual_conditionals
+            .iter()
+            .map(|(id, (r, a))| (id, (r, a)));
+        trues
+            .chain(falses)
+            .chain(nontrivial)
+            .map(|(id, (r, a))| (Effect::Conditional, id, r, a))
+    }
+
     /// Return the residual for a given [`PolicyID`], if it exists in the response
     pub fn get(&self, id: &PolicyID) -> Option<Policy> {
-        self.get_permit(id).or_else(|| self.get_forbid(id))
+        self.get_permit(id)
+            .or_else(|| self.get_forbid(id))
+            .or_else(|| self.get_conditional(id))
     }
 
     fn get_permit(&self, id: &PolicyID) -> Option<Policy> {
@@ -310,6 +389,23 @@ impl PartialResponse {
             .map(|(expr, a)| construct_policy((Effect::Forbid, id, expr, a)))
     }
 
+    fn get_conditional(&self, id: &PolicyID) -> Option<Policy> {
+        self.residual_conditionals
+            .get(id)
+            .map(|(a, b)| (a, b))
+            .or_else(|| {
+                self.satisfied_conditionals
+                    .get(id)
+                    .map(|a| (&self.true_expr, a))
+            })
+            .or_else(|| {
+                self.false_conditionals
+                    .get(id)
+                    .map(|(_, a)| (&self.false_expr, a))
+            })
+            .map(|(expr, a)| construct_policy((Effect::Conditional, id, expr, a)))
+    }
+
     /// Attempt to re-authorize this response given a mapping from unknowns to values
     pub fn reauthorize(
         &self,
@@ -327,6 +423,7 @@ impl PartialResponse {
         PolicySet::try_from_iter(
             self.all_permit_residuals()
                 .chain(self.all_forbid_residuals())
+                .chain(self.all_conditional_residuals())
                 .map(mapper),
         )
     }
@@ -381,6 +478,7 @@ impl PartialResponse {
         self.residual_forbids
             .into_iter()
             .chain(self.residual_permits)
+            .chain(self.residual_conditionals)
             .map(
                 |(id, (expr, _))| AuthorizationError::PolicyEvaluationError {
                     id,
@@ -442,7 +540,13 @@ impl EntityUIDEntry {
 
 impl From<PartialResponse> for Response {
     fn from(p: PartialResponse) -> Self {
-        let decision = if !p.satisfied_permits.is_empty() && p.satisfied_forbids.is_empty() {
+        // Residuals are treated as errors, so only satisfied policies count.
+        // Precedence is `forbid` > `conditional` > `permit` > default deny.
+        let decision = if !p.satisfied_forbids.is_empty() {
+            Decision::Deny
+        } else if !p.satisfied_conditionals.is_empty() {
+            Decision::ConditionalAllow
+        } else if !p.satisfied_permits.is_empty() {
             Decision::Allow
         } else {
             Decision::Deny
@@ -603,6 +707,9 @@ mod test {
             e,
             fg,
             h,
+            empty(),
+            empty(),
+            empty(),
             errs,
             Arc::new(Request::new_unchecked(
                 EntityUIDEntry::unknown(),

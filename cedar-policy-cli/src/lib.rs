@@ -777,6 +777,9 @@ pub enum CedarExitCode {
     // The command completed successfully, but the result of the authorization
     // request was DENY.
     AuthorizeDeny,
+    // The command completed successfully, but the result of the authorization
+    // request was CONDITIONAL_ALLOW.
+    AuthorizeConditionalAllow,
     // The command completed successfully, but it detected a validation failure
     // in the given schema and policies.
     ValidationFailure,
@@ -793,6 +796,7 @@ impl Termination for CedarExitCode {
             CedarExitCode::Failure => ExitCode::FAILURE,
             CedarExitCode::AuthorizeDeny => ExitCode::from(2),
             CedarExitCode::ValidationFailure => ExitCode::from(3),
+            CedarExitCode::AuthorizeConditionalAllow => ExitCode::from(4),
             #[cfg(feature = "partial-eval")]
             CedarExitCode::Unknown => ExitCode::SUCCESS,
         }
@@ -1377,6 +1381,10 @@ pub fn authorize(args: &AuthorizeArgs) -> CedarExitCode {
                     println!("DENY");
                     CedarExitCode::AuthorizeDeny
                 }
+                Decision::ConditionalAllow => {
+                    println!("CONDITIONAL_ALLOW");
+                    CedarExitCode::AuthorizeConditionalAllow
+                }
             };
             if ans.diagnostics().errors().peekable().peek().is_some() {
                 println!();
@@ -1434,6 +1442,10 @@ pub fn partial_authorize(args: &PartiallyAuthorizeArgs) -> CedarExitCode {
             Some(Decision::Deny) => {
                 println!("DENY");
                 CedarExitCode::AuthorizeDeny
+            }
+            Some(Decision::ConditionalAllow) => {
+                println!("CONDITIONAL_ALLOW");
+                CedarExitCode::AuthorizeConditionalAllow
             }
             None => {
                 println!("UNKNOWN");

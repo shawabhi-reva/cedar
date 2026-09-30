@@ -109,6 +109,9 @@ pub enum Token {
     #[token("forbid")]
     Forbid,
 
+    #[token("conditional")]
+    Conditional,
+
     #[token("when")]
     When,
 
@@ -260,6 +263,7 @@ impl fmt::Display for Token {
             Self::Equal => write!(f, "=="),
             Self::False => write!(f, "false"),
             Self::Forbid => write!(f, "forbid"),
+            Self::Conditional => write!(f, "conditional"),
             Self::Ge => write!(f, ">="),
             Self::Gt => write!(f, ">"),
             Self::Has => write!(f, "has"),

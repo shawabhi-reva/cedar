@@ -1202,6 +1202,7 @@ impl Diagnostics {
     /// match response.decision() {
     ///     Decision::Allow => println!("ALLOW"),
     ///     Decision::Deny => println!("DENY"),
+    ///     Decision::ConditionalAllow => println!("CONDITIONAL_ALLOW"),
     /// }
     /// println!("note: this decision was due to the following policies:");
     /// for reason in response.diagnostics().reason() {
@@ -1262,6 +1263,7 @@ impl Diagnostics {
     /// match response.decision() {
     ///     Decision::Allow => println!("ALLOW"),
     ///     Decision::Deny => println!("DENY"),
+    ///     Decision::ConditionalAllow => println!("CONDITIONAL_ALLOW"),
     /// }
     /// for err in response.diagnostics().errors() {
     ///     println!("{}", err);

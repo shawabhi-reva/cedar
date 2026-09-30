@@ -1921,6 +1921,10 @@ pub enum Effect {
     Permit,
     /// this is a Forbid policy
     Forbid,
+    /// this is a Conditional policy: when satisfied (and no Forbid is), the
+    /// request is allowed only on the conditions carried by the policy's
+    /// annotations. Takes precedence over Permit.
+    Conditional,
 }
 
 impl std::fmt::Display for Effect {
@@ -1928,6 +1932,7 @@ impl std::fmt::Display for Effect {
         match self {
             Self::Permit => write!(f, "permit"),
             Self::Forbid => write!(f, "forbid"),
+            Self::Conditional => write!(f, "conditional"),
         }
     }
 }
